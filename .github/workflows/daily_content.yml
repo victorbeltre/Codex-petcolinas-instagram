@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   generar-y-publicar:
@@ -17,6 +18,23 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      - name: Validar secrets
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+        run: |
+          faltan=""
+          if [ -z "$OPENAI_API_KEY" ]; then faltan="$faltan OPENAI_API_KEY"; fi
+          if [ -z "$IG_ACCESS_TOKEN" ]; then faltan="$faltan IG_ACCESS_TOKEN"; fi
+          if [ -z "$INSTAGRAM_ACCOUNT_ID" ]; then faltan="$faltan INSTAGRAM_ACCOUNT_ID"; fi
+          if [ -n "$faltan" ]; then
+            echo "Error: faltan estos secrets en GitHub (Settings -> Secrets and variables -> Actions):$faltan"
+            echo "Configuralos antes de volver a correr el workflow."
+            exit 1
+          fi
+          echo "Secrets OK: los 3 secrets requeridos estan configurados."
+
       - name: Checkout del repositorio
         uses: actions/checkout@v4
 
@@ -31,25 +49,63 @@ jobs:
       - name: Generar imagen y caption
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TEXT_MODEL: ${{ vars.OPENAI_TEXT_MODEL }}
+          OPENAI_IMAGE_MODEL: ${{ vars.OPENAI_IMAGE_MODEL }}
         run: python generate_content.py
 
       - name: Commit y push de imagen y caption
+        id: commit_post
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add post_del_dia.jpg caption.txt
           git diff --staged --quiet || git commit -m "Post automatico PetColinas $(date +'%Y-%m-%d')"
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Esperar propagacion del CDN de GitHub
-        run: sleep 15
+      - name: Esperar disponibilidad de la imagen
+        env:
+          IMAGE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.commit_post.outputs.sha }}/post_del_dia.jpg
+        run: |
+          echo "Verificando que la imagen este disponible en: $IMAGE_URL"
+          for intento in $(seq 1 12); do
+            CODIGO=$(curl -s -o /dev/null -w "%{http_code}" "$IMAGE_URL" || true)
+            if [ "$CODIGO" = "200" ]; then
+              echo "Imagen disponible (HTTP 200) en el intento $intento."
+              exit 0
+            fi
+            echo "Intento $intento/12: HTTP $CODIGO, reintentando en 5s..."
+            sleep 5
+          done
+          echo "Error: la imagen no estuvo disponible en raw.githubusercontent.com tras 60s. Instagram no podria descargarla."
+          exit 1
 
       - name: Publicar en Instagram
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
-          IMAGE_URL: https://raw.githubusercontent.com/${{ github.repository }}/main/post_del_dia.jpg
+          # URL pineada al SHA del commit: sin problemas de cache del CDN
+          IMAGE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.commit_post.outputs.sha }}/post_del_dia.jpg
         run: |
           CAPTION="$(cat caption.txt)"
           export CAPTION
           python publish_to_ig.py
+
+      - name: Reportar fallo con Issue automatico
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITULO="Fallo el workflow de contenido diario de PetColinas"
+          PASO=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            --jq '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | first // empty' || true)
+          PASO=${PASO:-desconocido (revisa los logs)}
+          CUERPO="$(printf 'El run del %s fallo en el paso: **%s**.\n\nLogs del run: %s' "$(date +'%Y-%m-%d')" "$PASO" "$RUN_URL")"
+          NUMERO=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --json number,title --jq ".[] | select(.title == \"$TITULO\") | .number" | head -n1 || true)
+          if [ -n "$NUMERO" ]; then
+            gh issue comment "$NUMERO" --repo "$GITHUB_REPOSITORY" --body "$CUERPO"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITULO" --body "$CUERPO"
+          fi

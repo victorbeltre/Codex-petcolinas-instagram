@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -6,6 +7,24 @@ import requests
 
 
 GRAPH_VERSION = "v19.0"
+
+
+def actionable_meta_error(payload: dict) -> str:
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    code = error.get("code")
+    message = error.get("message", payload)
+    try:
+        detalle = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        detalle = str(payload)
+    if code == 190:
+        return (
+            f"Error Meta (codigo 190): token de acceso invalido o expirado ({message}). "
+            "Renueva IG_ACCESS_TOKEN en Meta (developers.facebook.com -> tu app -> tokens) "
+            "y actualiza el secret IG_ACCESS_TOKEN en GitHub. "
+            f"Detalle completo: {detalle}"
+        )
+    return f"Error Meta API: {message}. Detalle completo: {detalle}"
 
 
 def graph_get(path: str, params: dict) -> dict:
@@ -20,7 +39,7 @@ def graph_get(path: str, params: dict) -> dict:
         response.raise_for_status()
         raise
     if response.status_code >= 400:
-        print(f"Error Meta API GET {path}: {data}")
+        print(f"Fallo GET {path}: {actionable_meta_error(data)}")
         sys.exit(1)
     return data
 
@@ -37,7 +56,7 @@ def graph_post(path: str, data: dict) -> dict:
         response.raise_for_status()
         raise
     if response.status_code >= 400:
-        print(f"Error Meta API POST {path}: {payload}")
+        print(f"Fallo POST {path}: {actionable_meta_error(payload)}")
         sys.exit(1)
     return payload
 
@@ -90,7 +109,7 @@ def publish() -> None:
     )
 
     if "error" in container:
-        print(f"Error Meta API (crear container): {container['error'].get('message', container)}")
+        print(f"Fallo al crear container: {actionable_meta_error(container)}")
         sys.exit(1)
 
     if "id" not in container:
@@ -111,7 +130,7 @@ def publish() -> None:
     )
 
     if "error" in published:
-        print(f"Error Meta API (publicar): {published['error'].get('message', published)}")
+        print(f"Fallo al publicar: {actionable_meta_error(published)}")
         sys.exit(1)
 
     print(f"Post publicado en Instagram con exito! ID: {published.get('id')}")

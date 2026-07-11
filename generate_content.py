@@ -7,6 +7,10 @@ Genera dos archivos en el directorio actual:
 
 Variable de entorno requerida:
   OPENAI_API_KEY  -> API key de OpenAI
+
+Variables de entorno opcionales:
+  OPENAI_TEXT_MODEL   -> modelo de texto (default: gpt-5.5, fallback: gpt-4.1)
+  OPENAI_IMAGE_MODEL  -> modelo de imagen (default: gpt-image-2, fallback: gpt-image-1)
 """
 
 import base64
@@ -17,11 +21,16 @@ import re
 import sys
 from io import BytesIO
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from PIL import Image
 
 
 client = None
+
+TEXT_MODEL_DEFAULT = "gpt-5.5"
+TEXT_MODEL_FALLBACK = "gpt-4.1"
+IMAGE_MODEL_DEFAULT = "gpt-image-2"
+IMAGE_MODEL_FALLBACK = "gpt-image-1"
 
 PETCOLINAS = """
 EMPRESA: PetColinas - Veterinaria y Peluqueria Canina
@@ -66,6 +75,51 @@ def require_env(name: str) -> str:
     return value
 
 
+def actionable_openai_error(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return (
+            "Error OpenAI (401): API key invalida o revocada. "
+            "Renueva la API key en platform.openai.com/api-keys y actualiza el secret OPENAI_API_KEY en GitHub."
+        )
+    if status == 404:
+        return (
+            "Error OpenAI (404): modelo no disponible para esta cuenta. "
+            "Configura OPENAI_TEXT_MODEL / OPENAI_IMAGE_MODEL con un modelo valido en las variables del repositorio."
+        )
+    if status == 429:
+        return (
+            "Error OpenAI (429): cuota o limite de uso excedido. "
+            "Revisa el plan y la facturacion en platform.openai.com/settings/organization/billing."
+        )
+    return f"Error OpenAI: {exc}"
+
+
+def is_model_unavailable(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 404:
+        return True
+    code = str(getattr(exc, "code", "") or "")
+    if code == "model_not_found":
+        return True
+    message = str(exc).lower()
+    return "model" in message and ("not found" in message or "does not exist" in message)
+
+
+def call_with_model_fallback(kind: str, primary: str, fallback: str, fn):
+    try:
+        result = fn(primary)
+        print(f"  Modelo de {kind} usado: {primary}")
+        return result
+    except OpenAIError as exc:
+        if primary == fallback or not is_model_unavailable(exc):
+            raise
+        print(f"  Aviso: modelo de {kind} '{primary}' no disponible. Reintentando con '{fallback}'...")
+        result = fn(fallback)
+        print(f"  Modelo de {kind} usado: {fallback}")
+        return result
+
+
 def extract_json(text: str) -> dict:
     try:
         return json.loads(text)
@@ -76,7 +130,7 @@ def extract_json(text: str) -> dict:
         return json.loads(match.group())
 
 
-def openai_generate_content() -> dict:
+def openai_generate_content(model: str) -> dict:
     if client is None:
         raise RuntimeError("Cliente OpenAI no inicializado")
 
@@ -103,7 +157,7 @@ Esquema requerido:
 }}"""
 
     response = client.responses.create(
-        model="gpt-5.5",
+        model=model,
         input=[
             {
                 "role": "system",
@@ -128,7 +182,7 @@ Esquema requerido:
     return data
 
 
-def generate_image(image_prompt: str) -> bytes:
+def generate_image(image_prompt: str, model: str) -> bytes:
     if client is None:
         raise RuntimeError("Cliente OpenAI no inicializado")
 
@@ -139,9 +193,9 @@ def generate_image(image_prompt: str) -> bytes:
     )
     full_prompt = (photo_prefix + image_prompt)[:32000]
 
-    print("  Generando imagen con OpenAI Images (gpt-image-2)...")
+    print(f"  Generando imagen con OpenAI Images ({model})...")
     result = client.images.generate(
-        model="gpt-image-2",
+        model=model,
         prompt=full_prompt,
         size="1024x1024",
         quality="high",
@@ -182,20 +236,36 @@ def generate_image(image_prompt: str) -> bytes:
 def main() -> None:
     global client
     client = OpenAI(api_key=require_env("OPENAI_API_KEY"))
+    text_model = os.getenv("OPENAI_TEXT_MODEL") or TEXT_MODEL_DEFAULT
+    image_model = os.getenv("OPENAI_IMAGE_MODEL") or IMAGE_MODEL_DEFAULT
     today = datetime.date.today()
 
     print(f"\n{'=' * 50}")
     print(f"  ORQUESTADOR PETCOLINAS - {today.strftime('%d/%m/%Y')}")
     print(f"{'=' * 50}\n")
 
-    print("[OpenAI] Generando estrategia, tema y caption...")
-    content = openai_generate_content()
-    print(f"  Tipo   : {content['tipo']}")
-    print(f"  Tema   : {content['tema']}")
-    print(f"  Caption: {content['caption'][:80]}...")
+    try:
+        print("[OpenAI] Generando estrategia, tema y caption...")
+        content = call_with_model_fallback(
+            "texto", text_model, TEXT_MODEL_FALLBACK, openai_generate_content
+        )
+        print(f"  Tipo   : {content['tipo']}")
+        print(f"  Tema   : {content['tema']}")
+        print(f"  Caption: {content['caption'][:80]}...")
 
-    print("\n[OpenAI Images] Generando imagen hiper-realista 1080x1080...")
-    image_bytes = generate_image(content["prompt_imagen"])
+        print("\n[OpenAI Images] Generando imagen hiper-realista 1080x1080...")
+        image_bytes = call_with_model_fallback(
+            "imagen",
+            image_model,
+            IMAGE_MODEL_FALLBACK,
+            lambda model: generate_image(content["prompt_imagen"], model),
+        )
+    except OpenAIError as exc:
+        print(f"\n{actionable_openai_error(exc)}")
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"\nError: OpenAI devolvio una respuesta invalida: {exc}")
+        sys.exit(1)
 
     with open("post_del_dia.jpg", "wb") as file:
         file.write(image_bytes)

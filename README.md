@@ -13,11 +13,26 @@ Sistema de automatizacion para publicar contenido diario en Instagram de PetColi
 
 ## Secrets necesarios
 
-Configurar en GitHub: `Settings -> Secrets and variables -> Actions`.
+Configurar en GitHub: `Settings -> Secrets and variables -> Actions -> Secrets`.
 
 - `OPENAI_API_KEY`
 - `IG_ACCESS_TOKEN`
 - `INSTAGRAM_ACCOUNT_ID`
+
+El workflow valida los 3 secrets como primer paso y falla rapido con un mensaje claro si falta alguno (sin imprimir sus valores).
+
+## Variables opcionales de modelo
+
+Configurar en GitHub: `Settings -> Secrets and variables -> Actions -> Variables` (no son secrets).
+
+- `OPENAI_TEXT_MODEL` (default: `gpt-5.5`)
+- `OPENAI_IMAGE_MODEL` (default: `gpt-image-2`)
+
+Si el modelo configurado no existe o no esta autorizado para la cuenta, el script reintenta una vez con un modelo alternativo conocido (`gpt-4.1` para texto, `gpt-image-1` para imagen) y deja en el log cual modelo se uso al final.
+
+## Issue automatico en fallos
+
+Si cualquier paso del workflow falla, un paso final crea un Issue en el repo indicando que paso fallo y el link al run. Si ya existe un Issue abierto con el mismo titulo, comenta en ese Issue en vez de crear uno nuevo.
 
 ## Logo
 
@@ -50,5 +65,6 @@ Actions -> PetColinas - Contenido Diario Automatico -> Run workflow
 ## Notas importantes
 
 - El repo debe ser publico para que Instagram pueda descargar `post_del_dia.jpg` desde `raw.githubusercontent.com`.
+- La URL de la imagen que se envia a Instagram va pineada al SHA del commit (`raw.githubusercontent.com/<repo>/<SHA>/post_del_dia.jpg`), asi que no depende de la cache del CDN de la rama `main`.
 - El token de Instagram de Meta normalmente vence y debe renovarse segun la configuracion de Meta.
 - OpenAI Images puede requerir verificacion de organizacion y genera costos por uso.
